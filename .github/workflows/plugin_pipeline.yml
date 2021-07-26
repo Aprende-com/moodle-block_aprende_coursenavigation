@@ -23,7 +23,7 @@ jobs:
           HEAD_COMMIT_MESSAGE=${HEAD_COMMIT_MESSAGE//[^a-zA-Z0-9_ .]/}
 
           SHA_SHORT=$(echo "${{ github.sha }}" | cut -c1-8)
-          ISSUE_ID=$(echo "${{ github.event.head_commit.message }}" | grep -Po "LMSDEV-[0-9]*" || true)
+          ISSUE_ID=$(echo "${{ github.event.head_commit.message }}" | grep -m1 -Po "LMSDEV-[0-9]*" || true)
 
           # Save them to ENV
           echo "K8S_NAMESPACE=${K8S_NAMESPACE}" | tee -a "${GITHUB_ENV}"
