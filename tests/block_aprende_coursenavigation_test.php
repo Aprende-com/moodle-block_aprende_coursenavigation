@@ -167,6 +167,44 @@ class block_aprende_coursenavigation_testcase extends \advanced_testcase {
     }
 
     /**
+     * @testdox A block's instance should not contain data related to deleted coursemodules.
+     *
+     * Given a course with some coursemodules within it
+     * When a coursemodule is deleted from the course
+     * Then the block instance should not contain data related to that coursemodule.
+     *
+     * @test
+     */
+    public function should_not_contain_deleted_coursemodules() {
+        global $PAGE;
+
+        $PAGE = $this->page;
+        $course = $this->course;
+
+        // We use pages, but it could be any activity type
+        $modfactory = self::getDataGenerator()->get_plugin_generator('mod_page');
+        $opts = array('course' => $course);
+        [$moda, $modb] = array_map(function() use ($modfactory, $opts) {
+            return $modfactory->create_instance($opts);
+        }, range(1, 2));
+
+        // Delete the last cm created
+        course_delete_module($modb->cmid);
+
+        // Instantiate a block
+        $record = $this->create_block_record($PAGE);
+        $block = block_instance('aprende_coursenavigation', $record, $PAGE);
+
+        // Generate the block's content
+        $block->get_content();
+        $context = $block->get_template_context();
+
+        $expected = 1;
+        $actual = count($context->sections[0]->modules);
+        self::assertEquals($expected, $actual, 'It should not contain data about deleted cms');
+    }
+
+    /**
      * Utility method to create block record
      * TODO: Refactor this method into a plugin instance generator
      */

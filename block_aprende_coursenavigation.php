@@ -347,7 +347,13 @@ class block_aprende_coursenavigation extends block_base {
             $thissection->modules = [];
             if (!empty($modinfo->sections[$i])) {
                 foreach ($modinfo->sections[$i] as $modnumber) {
+
                     $module = $modinfo->cms[$modnumber];
+
+                    if ($module->deletioninprogress) {
+                        continue;
+                    }
+
                     if ((get_config('block_aprende_coursenavigation', 'toggleshowlabels') == 1) &&
                         ($module->modname == 'label')) {
                         continue;
@@ -444,7 +450,7 @@ class block_aprende_coursenavigation extends block_base {
 
                     // Automatically expand this mod's section on all courses using clases magistrales format.
                     $thismod->sectionexpanded = $this->course_is_microcourse();
-                    
+
                     if (isset($PAGE->cm->url) && $module->url === $PAGE->cm->url) {
                         $thismod->currentinpage = true;
                         $thismod->sectionexpanded = true;
@@ -631,7 +637,7 @@ class block_aprende_coursenavigation extends block_base {
     /**
      * Simple utility function to determine if the current course
      * is in the microcourse format.
-     * 
+     *
      * @return bool
      */
     public function course_is_microcourse() {
