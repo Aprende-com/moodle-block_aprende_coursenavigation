@@ -1,5 +1,8 @@
 # Changelog
 
+## 08/16/2021
+- fix: Add check to discard cms that are being or were deleted.
+
 ## 07/19/2021
 - fix: change logic for automatic expansion in microcourses
 
