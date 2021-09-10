@@ -1,4 +1,4 @@
----
+---  # 2021 09 10
 
 name: "Single Plugin Pipeline Dispatch"
 on:
@@ -69,8 +69,8 @@ jobs:
               }]
             }
 
-      - name: "debug"
-        if: always()
-        run: |
-          cat "${GITHUB_ENV}"
-
+            #      - name: "debug"
+            #        if: always()
+            #        run: |
+            #          cat "${GITHUB_ENV}"
+            #

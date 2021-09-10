@@ -1,0 +1,376 @@
+---  # 2021 09 10
+
+name: Run PHPUnit tests and coverage report
+on:
+  pull_request:
+    types: [opened]
+    branches: master
+  workflow_dispatch:
+
+env:
+  MOODLE_DEV_BRANCH: aprende_3101_dev
+  IMAGE_REPOSITORY: "249553882629.dkr.ecr.us-east-1.amazonaws.com"
+
+jobs:
+
+  start_mysql:
+    if: "!contains(github.event.commits[0].message, '[skip ci]')"
+    runs-on: [self-hosted, long-distance-runner]
+    outputs:
+      MYSQL_IP: ${{ steps.mysql_ip.outputs.MYSQL_IP }}
+
+    steps:
+
+      - name: "mysql: generate random password"
+        run: |
+          MYSQL_ROOT_PASSWORD=$(dd if=/dev/urandom bs=1 count=16 2>/dev/null \
+                                  | base64 -w 0 | rev | cut -b 2- | rev)
+
+          echo "MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD}" | tee -a "${GITHUB_ENV}"
+
+      - name: "mysql: start local container"
+        timeout-minutes: 1
+        run: |
+          docker run --rm --detach \
+            -e MYSQL_ROOT_PASSWORD="${MYSQL_ROOT_PASSWORD}" \
+            --name mysql \
+            mysql:8.0
+
+      - name: "mysql: wait"
+        timeout-minutes: 1
+        run: |
+
+          while ! docker exec mysql mysqladmin -p${MYSQL_ROOT_PASSWORD} \
+                    ping --silent 2>/dev/null; do
+            echo "Waiting mysqld to be online."
+            sleep 5
+          done
+
+      - name: "mysql: setup"
+        timeout-minutes: 1
+        run: |
+          while ! docker exec mysql \
+            mysql -uroot -p"${MYSQL_ROOT_PASSWORD}" \
+                  -e "SHOW DATABASES" 2>/dev/null; do
+              echo "Waiting test connection as root"
+              sleep 5
+          done
+
+          SQL="CREATE DATABASE moodle_db; "
+          SQL+="CREATE USER 'moodle_user'@'%' IDENTIFIED BY 'moodle_pass'; "
+          SQL+="GRANT ALL PRIVILEGES ON moodle_db.* TO 'moodle_user'@'%'; "
+          SQL+="FLUSH PRIVILEGES; "
+
+          docker exec mysql \
+            mysql -uroot -p"${MYSQL_ROOT_PASSWORD}" \
+                -e "${SQL}"
+
+      - name: "mysql: test connection as moodle_user"
+        run: |
+          docker exec mysql \
+            mysql moodle_db -u"moodle_user" -p"moodle_pass" \
+                  -e "SELECT 1"
+
+      - name: "mysql: extract ip address"
+        id: mysql_ip
+        run: |
+          FMT="{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}"
+          MYSQL_IP=$(docker inspect --format="${FMT}" mysql)
+
+          echo "MYSQL_IP=${MYSQL_IP}" | tee -a "${GITHUB_ENV}"
+          echo "::set-output name=MYSQL_IP::${MYSQL_IP}"
+
+
+  build:
+    if: "!contains(github.event.commits[0].message, '[skip ci]')"
+    needs: start_mysql
+    runs-on: [self-hosted, long-distance-runner]
+    outputs:
+      DOCKER_IMAGE: ${{ steps.docker_image.outputs.DOCKER_IMAGE }}
+
+    steps:
+
+      - name: "devops: prepare environment"
+        run: |
+          # Generate VARIABLES
+          DEVOPS_LOCAL=$(mktemp -u -d -p ${GITHUB_WORKSPACE}/tmp)
+
+          # Save them to GITHUB_ENV
+          echo "DEVOPS_LOCAL=${DEVOPS_LOCAL}" | tee -a "${GITHUB_ENV}"
+
+      - name: "devops: checkout"
+        uses: actions/checkout@v2
+        with:
+          repository: Aprende-com/devops
+          ref: main
+          token: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+          path: ${{ env.DEVOPS_LOCAL }}
+
+      - name: "ecr: login"
+        run: |
+          if ! docker login "https://${IMAGE_REPOSITORY}"; then
+            aws ecr get-login-password --region us-east-1 | \
+              docker login --username AWS --password-stdin \
+                "https://${IMAGE_REPOSITORY}"
+          fi
+
+      - name: "docker: prepare environment"
+        run: |
+          # Generate VARIABLES
+          EPOCH=$(date '+%s')       # So images tags never overlap
+          DATE=$(date '+%Y%m%d')    # Readable date
+
+          BASE_IMAGE_NAME="aprende-moodle"
+          BASE_IMAGE_TAG="base-${EPOCH}-${DATE}-${GITHUB_RUN_NUMBER}" # Workflow traceability
+          BASE_IMAGE_URL="${BASE_IMAGE_NAME}:${BASE_IMAGE_TAG}"
+
+          NEW_IMAGE_NAME="aprende-moodle"
+          NEW_IMAGE_TAG="phpunit-${EPOCH}-${DATE}-${GITHUB_RUN_NUMBER}" # Workflow traceability
+          NEW_IMAGE_URL="${NEW_IMAGE_NAME}:${NEW_IMAGE_TAG}"
+
+          # Save them to GITHUB_ENV
+          echo "DATE=${DATE}" | tee -a "${GITHUB_ENV}"
+          echo "EPOCH=${EPOCH}" | tee -a "${GITHUB_ENV}"
+
+          echo "BASE_IMAGE_NAME=${BASE_IMAGE_NAME}" | tee -a "${GITHUB_ENV}"
+          echo "BASE_IMAGE_TAG=${BASE_IMAGE_TAG}" | tee -a "${GITHUB_ENV}"
+          echo "BASE_IMAGE_URL=${BASE_IMAGE_URL}" | tee -a "${GITHUB_ENV}"
+          echo "NEW_IMAGE_NAME=${NEW_IMAGE_NAME}" | tee -a "${GITHUB_ENV}"
+          echo "NEW_IMAGE_TAG=${NEW_IMAGE_TAG}" | tee -a "${GITHUB_ENV}"
+          echo "NEW_IMAGE_URL=${NEW_IMAGE_URL}" | tee -a "${GITHUB_ENV}"
+
+      - name: "docker: build base image"
+        run: |
+          cd "${DEVOPS_LOCAL}/moodle-dev/docker"
+          docker build . \
+            --file Dockerfile.build_base \
+            -t "${BASE_IMAGE_URL}"
+
+      - name: "moodle-dev: prepare environment"
+        run: |
+          # Generate VARIABLES
+          MOODLE_LOCAL=$(mktemp -u -d -p ${GITHUB_WORKSPACE}/tmp)
+
+          # Save them to GITHUB_ENV
+          echo "MOODLE_LOCAL=${MOODLE_LOCAL}" | tee -a "${GITHUB_ENV}"
+
+      - name: "moodle-dev: checkout"
+        uses: actions/checkout@v2
+        with:
+          repository: Aprende-com/moodle-dev
+          ref: ${{ env.MOODLE_DEV_BRANCH }}
+          token: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+          path: ${{ env.MOODLE_LOCAL }}
+          submodules: true
+
+      - name: "plugin: prepare environment"
+        run: |
+          # Generate VARIABLES
+          PLUGIN_REPO="${{ github.repository }}"
+          PLUGIN_REF="${{ github.ref }}"
+          PLUGIN_NAME="$(echo "${PLUGIN_REPO}" | awk -F/ '{print $NF}')"
+          PLUGIN_PATH=$(grep "${PLUGIN_REPO}" -B2 "${MOODLE_LOCAL}"/.gitmodules | grep -Po "path = \K.*")
+          PLUGIN_LOCAL="${MOODLE_LOCAL}/${PLUGIN_PATH}"
+
+          # Save them to GITHUB_ENV
+          echo "PLUGIN_REPO=${PLUGIN_REPO}" | tee -a "${GITHUB_ENV}"
+          echo "PLUGIN_REF=${PLUGIN_REF}" | tee -a "${GITHUB_ENV}"
+          echo "PLUGIN_NAME=${PLUGIN_NAME}" | tee -a "${GITHUB_ENV}"
+          echo "PLUGIN_PATH=${PLUGIN_PATH}" | tee -a "${GITHUB_ENV}"
+          echo "PLUGIN_LOCAL=${PLUGIN_LOCAL}" | tee -a "${GITHUB_ENV}"
+
+      - name: "plugin: checkout"
+        uses: actions/checkout@v2
+        with:
+          repository: ${{ github.event.client_payload.repository }}
+          ref: ${{ github.event.client_payload.ref }}
+          token: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+          path: ${{ env.PLUGIN_LOCAL }}
+          fetch-depth: 0
+
+      - name: "devops: build docker image"
+        run: |
+          cd "${MOODLE_LOCAL}"
+          echo "FROM ${BASE_IMAGE_URL}" | tee Dockerfile
+          echo "COPY . /var/www/moodle" | tee -a Dockerfile
+          echo "RUN chown -R www-data. /var/www/moodle" | tee -a Dockerfile
+          docker build . \
+            -t "${NEW_IMAGE_URL}"
+
+      - name: "docker: create moodle container"
+        run: |
+          CONTAINER=$(docker create "${NEW_IMAGE_URL}")
+          echo "CONTAINER=${CONTAINER}" | tee -a "${GITHUB_ENV}"
+
+      - name: "moodle: setup config.php"
+        run: |
+          TMP_CONFIG=$(mktemp)
+          aws s3 cp s3://aprende-config-test/config.php "${TMP_CONFIG}"
+          sed -i "s|mysql_host|${{ needs.start_mysql.outputs.MYSQL_IP }}|g" "${TMP_CONFIG}"
+          docker cp "${TMP_CONFIG}" "${CONTAINER}":/var/www/moodle/config.php
+          rm "${TMP_CONFIG}"
+
+      - name: "moodle: setup phpunit.xml"
+        run: |
+          TMP_CONFIG=$(mktemp)
+          aws s3 cp s3://aprende-config-test/phpunit_template.xml "${TMP_CONFIG}"
+
+          # TODO: Test every plugin!
+          sed -i '/ <testsuite name="aprende_phpunit_testsuite">/a  \ \ \ \ \ \ \ \ \ \   <directory suffix="_test.php">'"${PLUGIN_PATH}"'/tests</directory>' "${TMP_CONFIG}"
+          sed -i '/ <whitelist>/a  \ \ \ \ \ \ \ \ \ \    <directory suffix=".php">'"${PLUGIN_PATH}"'</directory>' "${TMP_CONFIG}"
+
+          cat "${TMP_CONFIG}"
+          docker cp "${TMP_CONFIG}" "${CONTAINER}":/var/www/moodle/phpunit_aprende.xml
+          rm "${TMP_CONFIG}"
+
+      - name: "docker: create image from container"
+        id: docker_image
+        run: |
+          docker commit "${CONTAINER}" "${NEW_IMAGE_URL}-ready"
+          echo "::set-output name=DOCKER_IMAGE::${NEW_IMAGE_URL}-ready"
+
+
+  test:
+    if: "!contains(github.event.commits[0].message, '[skip ci]')"
+    runs-on: [self-hosted, long-distance-runner]
+    needs: build
+    outputs:
+      CONTAINER: ${{ steps.docker_container.outputs.CONTAINER }}
+
+    steps:
+
+      - name: "docker: start idle moodle container"
+        id: docker_container
+        run: |
+          CONTAINER=$(docker run --rm --detach \
+            --entrypoint sleep \
+            "${{ needs.build.outputs.DOCKER_IMAGE }}" infinity)
+
+          echo "CONTAINER=${CONTAINER}" | tee -a "${GITHUB_ENV}"
+          echo "::set-output name=CONTAINER::${CONTAINER}"
+
+      - name: "moodle: install xdebug"
+        run: |
+          dcmd() { docker exec -t "${CONTAINER}" "$@"; }
+
+          dcmd pecl install xdebug
+
+      - name: "moodle: enable xdebug"
+        run: |
+          dcmd() { docker exec -t "${CONTAINER}" "$@"; }
+
+          XDEBUG_INI="/usr/local/etc/php/conf.d/aprende-xdebug.ini"
+
+          if dcmd test -f "${XDEBUG_INI}"; then
+            echo "XDEBUG_INI already present"
+          fi
+
+          if dcmd test -f "${XDEBUG_INI}.disabled"; then
+              echo "XDEBUG_INI seems disabled. Enabling it"
+              dcmd mv "${XDEBUG_INI}.disabled" "${XDEBUG_INI}"
+          fi
+
+      - name: "composer: download binary"
+        run: |
+          dcmd() { docker exec -t "${CONTAINER}" "$@"; }
+
+          COMPOSER_INSTALLER="/tmp/composer-installer.php"
+          COMPOSER_HASH=$(curl -sS https://composer.github.io/installer.sig)
+
+          dcmd curl https://getcomposer.org/installer -o "${COMPOSER_INSTALLER}"
+          dcmd ls -l "${COMPOSER_INSTALLER}"
+
+          echo "COMPOSER_INSTALLER=${COMPOSER_INSTALLER}" | tee -a "${GITHUB_ENV}"
+          echo "COMPOSER_HASH=${COMPOSER_HASH}" | tee -a "${GITHUB_ENV}"
+
+          #        - name: "composer: verify"
+          #          run: |
+          #            dcmd() { docker exec -t "${CONTAINER}" "$@"; }
+          #
+          #            COMPOSER_HASH_LOCAL=$(dcmd cat "${COMPOSER_INSTALLER}" | sha384sum | cut -f1 -d" ")
+          #            echo "COMPOSER_HASH_LOCAL=${COMPOSER_HASH_LOCAL}" | tee -a "${GITHUB_ENV}"
+          #
+          #            [ "${COMPOSER_HASH}" == "${COMPOSER_HASH_LOCAL}" ]
+
+      - name: "composer: install binary"
+        run: |
+          dcmd() { docker exec -t "${CONTAINER}" "$@"; }
+
+          dcmd php "${COMPOSER_INSTALLER}" \
+                --install-dir=/usr/local/bin --filename=composer
+
+      - name: "composer: install"
+        run: |
+          dcmd() { docker exec -t "${CONTAINER}" "$@"; }
+
+          dcmd composer install
+
+      - name: "composer: update"
+        run: |
+          dcmd() { docker exec -t "${CONTAINER}" "$@"; }
+
+          dcmd composer update
+
+      - name: "phpunit: init"
+        run: |
+          dcmd() { docker exec -t "${CONTAINER}" "$@"; }
+
+          dcmd php admin/tool/phpunit/cli/init.php
+
+      - name: "phpunit: coverage"
+        run: |
+          dcmd() { docker exec -t "${CONTAINER}" "$@"; }
+
+          dcmd php vendor/bin/phpunit \
+            --coverage-html coverage-html-output \
+            --configuration phpunit_aprende.xml \
+            --testsuite aprende_phpunit_testsuite
+
+      - name: "phpunit: check report exists"
+        run: |
+          dcmd() { docker exec -t "${CONTAINER}" "$@"; }
+
+          dcmd test -d coverage-html-output
+
+      - name: "reports: prepare environment"
+        run: |
+          # Generate VARIABLES
+          TEST_ENV="${PLUGIN_NAME}"
+          TEST_DATE=$(date +'%Y/%m')
+          TEST_MODE="coverage"
+
+          REPORTS=$(sudo docker volume inspect --format '{{ .Mountpoint }}' serenity)
+          REPORT_URL="http://reports.aprende.dev/${TEST_ENV}/${TEST_MODE}/${TEST_DATE}"
+
+          # Save them to GITHUB_ENV
+          echo "REPORTS=${REPORTS}" | tee -a "${GITHUB_ENV}"
+          echo "REPORT_URL=${REPORT_URL}" | tee -a "${GITHUB_ENV}"
+
+          echo "TEST_ENV=${TEST_ENV}" | tee -a "${GITHUB_ENV}"
+          echo "TEST_DATE=${TEST_DATE}" | tee -a "${GITHUB_ENV}"
+          echo "TEST_MODE=${TEST_MODE}" | tee -a "${GITHUB_ENV}"
+
+      - name: "phpunit: extract report"
+        run: |
+          # Remove previous report
+          rm -rf "${REPORTS}/${TEST_MODE}/${TEST_DATE}"
+          mkdir -p "${REPORTS}/${TEST_MODE}/${TEST_DATE%/*}"
+
+          docker cp "${CONTAINER}":/var/www/moodle/coverage-html-output "${REPORTS}/${TEST_MODE}/${TEST_DATE}"
+
+
+  clean_up:
+    if: always()
+    runs-on: [self-hosted, long-distance-runner]
+    needs: [start_mysql, build, test]
+
+    steps:
+
+      - name: clean up
+        run: |
+          CONTAINER=${{ needs.test.outputs.CONTAINER }}
+
+          docker stop mysql || echo "Warning: Failed to stop mysql"
+          docker stop "${CONTAINER}" || echo "Warning: Failed to stop ${CONTAINER}"
+          rm -rf "${MOODLE_LOCAL}"
+          rm -rf "${DEVOPS_LOCAL}"
