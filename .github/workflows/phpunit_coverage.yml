@@ -161,7 +161,7 @@ jobs:
           ref: ${{ env.MOODLE_DEV_BRANCH }}
           token: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
           path: ${{ env.MOODLE_LOCAL }}
-          submodules: true
+          submodules: recursive
 
       - name: "plugin: prepare environment"
         run: |
